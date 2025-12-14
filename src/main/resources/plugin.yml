@@ -1,0 +1,22 @@
+name: IPv6Guard
+version: '1.0'
+main: com.tendoarisu.ipv6guard.IPv6Guard
+api-version: '1.21'
+commands:
+  ban6:
+    description: Bans an IPv6 address or range
+    usage: /ban6 <ipv6-address|ipv6-range> [reason]
+    permission: banipv6.ban6
+    permission-message: You don't have permission to use this command
+  pardon6:
+    description: Pardons a banned IPv6 address or range
+    usage: /pardon6 <ipv6-address|ipv6-range>
+    permission: banipv6.pardon6
+    permission-message: You don't have permission to use this command
+permissions:
+  banipv6.ban6:
+    description: Allows banning IPv6 addresses and ranges
+    default: op
+  banipv6.pardon6:
+    description: Allows pardoning banned IPv6 addresses and ranges
+    default: op
