@@ -1,0 +1,18 @@
+# IPv6Guard Configuration
+
+# Language settings
+language: "en"
+
+# Safety configurations
+safety:
+  # Enable proxy guard to detect shared IP usage
+  enable-proxy-guard: false
+  
+  # Maximum unique players per /64 range within time window
+  shared-ip-threshold: 10
+  
+  # Time window in seconds for proxy guard
+  time-window-seconds: 60
+  
+  # Forbid banning prefixes shorter than this length without -f parameter
+  forbid-prefix-below: 32

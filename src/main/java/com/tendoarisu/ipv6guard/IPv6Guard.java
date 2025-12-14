@@ -161,7 +161,12 @@ public class IPv6Guard extends JavaPlugin implements CommandExecutor, Listener, 
     @Override
     public void onDisable() {
         saveBans();
-        getLogger().info(getLang("plugin.disabled"));
+        // Check if langConfig is initialized before using it
+        if (langConfig != null) {
+            getLogger().info(getLang("plugin.disabled"));
+        } else {
+            getLogger().info("IPv6Guard plugin has been disabled.");
+        }
     }
 
     private boolean validateProxySupport() {
