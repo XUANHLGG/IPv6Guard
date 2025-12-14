@@ -24,6 +24,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
+import java.text.SimpleDateFormat;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -31,14 +32,12 @@ import java.util.concurrent.CopyOnWriteArrayList;
 public class IPv6Guard extends JavaPlugin implements CommandExecutor, Listener, TabCompleter {
 
     private static class BanEntry {
-        final UUID id;
         final String prefix;
         final String reason;
         final long time;
         final long expireTime; // 0 means permanent ban
 
         BanEntry(String prefix, String reason, long time) {
-            this.id = UUID.randomUUID();
             this.prefix = prefix;
             this.reason = reason;
             this.time = time;
@@ -46,23 +45,6 @@ public class IPv6Guard extends JavaPlugin implements CommandExecutor, Listener, 
         }
         
         BanEntry(String prefix, String reason, long time, long expireTime) {
-            this.id = UUID.randomUUID();
-            this.prefix = prefix;
-            this.reason = reason;
-            this.time = time;
-            this.expireTime = expireTime;
-        }
-        
-        BanEntry(UUID id, String prefix, String reason, long time) {
-            this.id = id;
-            this.prefix = prefix;
-            this.reason = reason;
-            this.time = time;
-            this.expireTime = 0; // Permanent ban by default
-        }
-        
-        BanEntry(UUID id, String prefix, String reason, long time, long expireTime) {
-            this.id = id;
             this.prefix = prefix;
             this.reason = reason;
             this.time = time;
@@ -97,6 +79,13 @@ public class IPv6Guard extends JavaPlugin implements CommandExecutor, Listener, 
         this.getCommand("ban6").setTabCompleter(this);
         this.getCommand("pardon6").setTabCompleter(this);
         
+        // Ensure complete default configuration is loaded
+        saveDefaultConfig();
+        
+        // Load and save default configuration to ensure all options are present
+        getConfig().options().copyDefaults(true);
+        saveConfig();
+        
         // Load safety configuration
         loadSafetyConfig();
         
@@ -106,6 +95,9 @@ public class IPv6Guard extends JavaPlugin implements CommandExecutor, Listener, 
         if (validateProxySupport()) {
             this.getServer().getPluginManager().registerEvents(this, this);
             getLogger().info(getLang("plugin.enabled"));
+            
+            // Schedule a task to check for expired bans every minute
+            getServer().getScheduler().runTaskTimer(this, this::checkExpiredBans, 20L * 60, 20L * 60); // 20 ticks = 1 second, so 20*60 = 60 seconds
         } else {
             getLogger().severe(getLang("plugin.proxy_config_error"));
             getServer().getPluginManager().disablePlugin(this);
@@ -118,23 +110,26 @@ public class IPv6Guard extends JavaPlugin implements CommandExecutor, Listener, 
         
         if (command.getName().equalsIgnoreCase("ban6")) {
             if (args.length == 1) {
-                // First argument: command options
-                completions.add("list");
-                completions.add("explain");
-            } else if (args.length == 2) {
-                if (args[0].equalsIgnoreCase("explain")) {
-                    // Second argument for explain: IPv6 addresses/ranges
-                    // Basic IPv6 suggestions
-                    completions.add("2408:8207::/64");
-                    completions.add("::1");
-                    completions.add("fe80::/10");
+                String arg = args[0].toLowerCase();
+                
+                // Check if input starts with list or reload, then complete it
+                if (arg.startsWith("list")) {
+                    completions.add("list");
+                }
+                if (arg.startsWith("reload")) {
+                    completions.add("reload");
+                }
+                
+                // If no partial match and not starting to type an IP, show all options
+                if (completions.isEmpty() && !isIPStart(arg)) {
+                    completions.add("list");
+                    completions.add("reload");
                 }
             }
         } else if (command.getName().equalsIgnoreCase("pardon6")) {
             if (args.length == 1) {
-                // First argument: ban IDs or IPv6 addresses
+                // Only show banned IPs, no UUIDs
                 for (BanEntry ban : bannedIPv6Ranges) {
-                    completions.add(ban.id.toString());
                     completions.add(ban.prefix);
                 }
             }
@@ -143,11 +138,23 @@ public class IPv6Guard extends JavaPlugin implements CommandExecutor, Listener, 
         return completions;
     }
     
+    // Check if a string looks like it's starting to be an IP (contains colon or slash)
+    private boolean isIPStart(String input) {
+        return input.contains(":") || input.contains("/") || input.matches(".*[0-9a-fA-F].*:");
+    }
+    
     // Load safety configuration from config.yml
     private void loadSafetyConfig() {
-        saveDefaultConfig();
         FileConfiguration config = getConfig();
         
+        // Set default values if not present
+        config.addDefault("language", "en");
+        config.addDefault("safety.enable-proxy-guard", false);
+        config.addDefault("safety.shared-ip-threshold", 10);
+        config.addDefault("safety.time-window-seconds", 60);
+        config.addDefault("safety.forbid-prefix-below", 32);
+        
+        // Load values
         enableProxyGuard = config.getBoolean("safety.enable-proxy-guard", false);
         sharedIpThreshold = config.getInt("safety.shared-ip-threshold", 10);
         timeWindowSeconds = config.getInt("safety.time-window-seconds", 60);
@@ -222,25 +229,48 @@ public class IPv6Guard extends JavaPlugin implements CommandExecutor, Listener, 
             lang = defaultLang;
         }
         
-        // Save default language config if not exists
-        saveDefaultConfig();
-        
-        // Load language file
-        langFile = new File(getDataFolder(), "lang/" + lang + ".yml");
-        if (!langFile.exists()) {
-            // Create lang directory if not exists
-            langFile.getParentFile().mkdirs();
-            // Save default language file
-            saveResource("lang/" + lang + ".yml", false);
+        // Create lang directory if not exists
+        File langDir = new File(getDataFolder(), "lang");
+        if (!langDir.exists()) {
+            langDir.mkdirs();
         }
         
+        // Generate all supported language files if they don't exist
+        for (String supportedLang : supportedLangs) {
+            File supportedLangFile = new File(langDir, supportedLang + ".yml");
+            if (!supportedLangFile.exists()) {
+                // Save default language file
+                saveResource("lang/" + supportedLang + ".yml", false);
+            } else {
+                // Always update language files with latest defaults when reloading
+                try {
+                    // Merge with latest defaults
+                    InputStream defLangStream = getResource("lang/" + supportedLang + ".yml");
+                    if (defLangStream != null) {
+                        YamlConfiguration defLangConfig = YamlConfiguration.loadConfiguration(new InputStreamReader(defLangStream));
+                        YamlConfiguration existingConfig = YamlConfiguration.loadConfiguration(supportedLangFile);
+                        
+                        // Set defaults and copy missing keys
+                        existingConfig.setDefaults(defLangConfig);
+                        existingConfig.options().copyDefaults(true);
+                        existingConfig.save(supportedLangFile);
+                    }
+                } catch (IOException e) {
+                    getLogger().severe("Failed to update language file: " + e.getMessage());
+                }
+            }
+        }
+        
+        // Load current language file
+        langFile = new File(langDir, lang + ".yml");
         langConfig = YamlConfiguration.loadConfiguration(langFile);
         
-        // Load defaults from jar if missing
+        // Load defaults from jar to ensure all keys are available
         InputStream defLangStream = getResource("lang/" + lang + ".yml");
         if (defLangStream != null) {
             YamlConfiguration defLangConfig = YamlConfiguration.loadConfiguration(new InputStreamReader(defLangStream));
             langConfig.setDefaults(defLangConfig);
+            langConfig.options().copyDefaults(true);
         }
     }
     
@@ -304,7 +334,6 @@ public class IPv6Guard extends JavaPlugin implements CommandExecutor, Listener, 
             for (BanEntry ban : bans) {
                 if (isIPv6InRange(address, ban.prefix)) {
                     event.disallow(AsyncPlayerPreLoginEvent.Result.KICK_BANNED, getLang("messages.kick_message", ban.reason));
-                    getLogger().info(getLang("messages.banned_connection", address, ban.prefix));
                     return;
                 }
             }
@@ -422,12 +451,11 @@ public class IPv6Guard extends JavaPlugin implements CommandExecutor, Listener, 
     
     private boolean handleBan6Command(CommandSender sender, String[] args) {
         if (args.length < 1) {
-            sender.sendMessage(getLang("commands.ban6.usage"));
+            // Don't send usage again, Bukkit already sends it from plugin.yml
             sender.sendMessage(getLang("commands.ban6.example1"));
             sender.sendMessage(getLang("commands.ban6.example2"));
             sender.sendMessage(getLang("commands.ban6.example3"));
             sender.sendMessage(getLang("commands.ban6.example4"));
-            sender.sendMessage(getLang("commands.ban6.example5"));
             sender.sendMessage(getLang("commands.ban6.example6"));
             return false;
         }
@@ -438,22 +466,11 @@ public class IPv6Guard extends JavaPlugin implements CommandExecutor, Listener, 
             return true;
         }
         
-        // Check for explain command
-        if (args[0].equalsIgnoreCase("explain")) {
-            if (args.length < 2) {
-                sender.sendMessage("§c" + getLang("commands.ban6.explain_usage"));
-                sender.sendMessage("§c" + getLang("commands.ban6.explain_example"));
-                return false;
-            }
-            explainIPv6Prefix(args[1], sender);
-            return true;
-        }
-        
         // Check for reload command
         if (args[0].equalsIgnoreCase("reload")) {
             // Reload configuration
             reloadPluginConfig();
-            sender.sendMessage("§aConfiguration reloaded successfully!");
+            sender.sendMessage("§a" + getLang("commands.ban6.success_reload"));
             return true;
         }
 
@@ -485,18 +502,15 @@ public class IPv6Guard extends JavaPlugin implements CommandExecutor, Listener, 
             // This is a CIDR range
             if (banIPv6Range(target, reason, force, sender, expireTime)) {
                 sender.sendMessage(getLang("commands.ban6.success_ban_range", target, reason));
-            } else {
-                sender.sendMessage(getLang("commands.ban6.failed_ban", target));
             }
         } else {
             // This is a single IPv6 address
             if (banIPv6Address(target, reason, sender, expireTime)) {
                 sender.sendMessage(getLang("commands.ban6.success_ban_ip", target, reason));
-            } else {
-                sender.sendMessage(getLang("commands.ban6.failed_ban", target));
             }
         }
 
+        // Don't send failed message if we already sent a specific message (like already banned)
         return true;
     }
     
@@ -511,108 +525,32 @@ public class IPv6Guard extends JavaPlugin implements CommandExecutor, Listener, 
         int count = 0;
         for (BanEntry ban : bannedIPv6Ranges) {
             count++;
-            String status = ban.expireTime > 0 ? "Temporary" : "Permanent";
+            // Use multi-language status
+            String status = ban.expireTime > 0 ? getLang("commands.ban6.status_temporary") : getLang("commands.ban6.status_permanent");
+            
+            // Format time using simple format for consistency
+            SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
             String expireInfo = ban.expireTime > 0 ? 
-                " (Expires: " + new java.util.Date(ban.expireTime) + ")" : "";
+                " (" + getLang("commands.ban6.expires") + ": " + sdf.format(new java.util.Date(ban.expireTime)) + ")" : "";
+            
             String[] parts = ban.prefix.split("/");
             int prefixLength = Integer.parseInt(parts[1]);
             
             sender.sendMessage("§7" + String.format(getLang("commands.ban6.ban_list_item"), count));
-            sender.sendMessage("   §7" + String.format(getLang("commands.ban6.ban_list_uuid"), ban.id));
             sender.sendMessage("   §7" + String.format(getLang("commands.ban6.ban_list_prefix"), ban.prefix));
             sender.sendMessage("   §7" + String.format(getLang("commands.ban6.ban_list_length"), prefixLength));
             sender.sendMessage("   §7" + String.format(getLang("commands.ban6.ban_list_reason"), ban.reason));
             sender.sendMessage("   §7" + String.format(getLang("commands.ban6.ban_list_status"), status, expireInfo));
-            sender.sendMessage("   §7" + String.format(getLang("commands.ban6.ban_list_banned_at"), new java.util.Date(ban.time)));
+            sender.sendMessage("   §7" + String.format(getLang("commands.ban6.ban_list_banned_at"), sdf.format(new java.util.Date(ban.time))));
         }
         sender.sendMessage("§6" + String.format(getLang("commands.ban6.ban_list_total"), bannedIPv6Ranges.size()));
     }
     
-    // Explain an IPv6 prefix
-    private void explainIPv6Prefix(String prefix, CommandSender sender) {
-        try {
-            String[] parts;
-            InetAddress inetAddress;
-            int prefixLength;
-            
-            if (prefix.contains("/")) {
-                // This is a CIDR range
-                parts = prefix.split("/");
-                inetAddress = InetAddress.getByName(parts[0]);
-                prefixLength = Integer.parseInt(parts[1]);
-            } else {
-                // This is a single IPv6 address, treat as /128
-                inetAddress = InetAddress.getByName(prefix);
-                prefixLength = 128;
-            }
-            
-            if (!(inetAddress instanceof Inet6Address)) {
-                sender.sendMessage("§c" + getLang("commands.ban6.explain_error"));
-                return;
-            }
-            
-            // Basic information
-            sender.sendMessage("§6" + getLang("commands.ban6.explain_title"));
-            sender.sendMessage("§7" + String.format(getLang("commands.ban6.explain_prefix"), prefix));
-            sender.sendMessage("§7" + String.format(getLang("commands.ban6.explain_length"), prefixLength));
-            
-            // Check if it's a forbidden IPv6
-            if (isForbiddenIPv6((Inet6Address) inetAddress)) {
-                sender.sendMessage("§c" + getLang("commands.ban6.explain_forbidden"));
-                return;
-            }
-            
-            // Classification
-            String classification;
-            String impact;
-            String ispCommon;
-            
-            if (prefixLength == 128) {
-                classification = "Single Address";
-                impact = "Affects only this specific IPv6 address";
-                ispCommon = "Common for individual devices";
-            } else if (prefixLength >= 64) {
-                classification = "/" + prefixLength + " Subnet";
-                impact = "Affects a small number of addresses within a single network";
-                ispCommon = "Commonly assigned by ISPs to residential networks";
-            } else if (prefixLength >= 48) {
-                classification = "ISP Customer Block";
-                impact = "Affects multiple /64 subnets assigned to a single customer";
-                ispCommon = "Assigned by ISPs to business customers";
-            } else if (prefixLength >= 32) {
-                classification = "Regional Allocation";
-                impact = "Affects a large range of addresses in a region";
-                ispCommon = "Rarely assigned to individual users";
-            } else {
-                classification = "Large Network Block";
-                impact = "Affects an extremely large number of addresses";
-                ispCommon = "Very rarely used in practice";
-            }
-            
-            sender.sendMessage("§7" + String.format(getLang("commands.ban6.explain_classification"), classification));
-            sender.sendMessage("§7" + String.format(getLang("commands.ban6.explain_impact"), impact));
-            sender.sendMessage("§7" + String.format(getLang("commands.ban6.explain_isp_common"), ispCommon));
-            
-            // Safety warning
-            if (prefixLength < 32) {
-                sender.sendMessage("§c" + getLang("commands.ban6.explain_warning_large"));
-                sender.sendMessage("§c" + getLang("commands.ban6.explain_warning_force"));
-            } else if (prefixLength < 48) {
-                sender.sendMessage("§e" + getLang("commands.ban6.explain_warning_medium"));
-            }
-            
-        } catch (UnknownHostException | NumberFormatException e) {
-            sender.sendMessage("§cError: Invalid IPv6 address or prefix format.");
-            sender.sendMessage("§cExample: /ban6 explain 2408:8207::/64");
-        }
-    }
-    
     private boolean handlePardon6Command(CommandSender sender, String[] args) {
         if (args.length < 1) {
-            sender.sendMessage(getLang("commands.pardon6.usage"));
+            // Don't send usage again, Bukkit already sends it from plugin.yml
             sender.sendMessage(getLang("commands.pardon6.example1"));
             sender.sendMessage(getLang("commands.pardon6.example2"));
-            sender.sendMessage("Example: /pardon6 <uuid>");
             return false;
         }
 
@@ -628,39 +566,11 @@ public class IPv6Guard extends JavaPlugin implements CommandExecutor, Listener, 
     
     private boolean pardonIPv6(String target) {
         try {
-            // Try to parse as UUID first
-            try {
-                UUID banId = UUID.fromString(target);
-                return pardonByUUID(banId);
-            } catch (IllegalArgumentException e) {
-                // Not a UUID, try as IPv6 address or range
-                return pardonByIPv6(target);
-            }
+            // Only try as IPv6 address or range, no UUID support
+            return pardonByIPv6(target);
         } catch (Exception e) {
             return false;
         }
-    }
-    
-    private boolean pardonByUUID(UUID banId) {
-        for (BanEntry ban : bannedIPv6Ranges) {
-            if (ban.id.equals(banId)) {
-                bannedIPv6Ranges.remove(ban);
-                
-                // Remove from prefix length bucket
-                int prefixLength = Integer.parseInt(ban.prefix.split("/")[1]);
-                List<BanEntry> bans = bansByPrefixLength.get(prefixLength);
-                if (bans != null) {
-                    bans.remove(ban);
-                    if (bans.isEmpty()) {
-                        bansByPrefixLength.remove(prefixLength);
-                    }
-                }
-                
-                saveBans();
-                return true;
-            }
-        }
-        return false;
     }
     
     private boolean pardonByIPv6(String target) {
@@ -721,12 +631,17 @@ public class IPv6Guard extends JavaPlugin implements CommandExecutor, Listener, 
     }
 
     private boolean banIPv6Address(String address, String reason, CommandSender sender, long expireTime) {
+        // Basic IPv6 address validation to prevent server lag
+        if (address == null || address.isEmpty() || !isValidIPv6Format(address)) {
+            return false;
+        }
+        
         try {
             InetAddress inetAddress = InetAddress.getByName(address);
             if (inetAddress instanceof Inet6Address inet6) {
                 // Check if it's a forbidden IPv6 address
                 if (isForbiddenIPv6(inet6)) {
-                    sender.sendMessage("§cRefuse to ban special IPv6 address.");
+                    sender.sendMessage("§c" + getLang("commands.ban6.refuse_special_ip"));
                     return false;
                 }
                 
@@ -736,6 +651,7 @@ public class IPv6Guard extends JavaPlugin implements CommandExecutor, Listener, 
                 // Check if already banned
                 for (BanEntry ban : bannedIPv6Ranges) {
                     if (ban.prefix.equals(normalizedPrefix)) {
+                        sender.sendMessage("§c" + getLang("messages.already_banned", normalizedPrefix));
                         return false; // Already banned
                     }
                 }
@@ -759,9 +675,24 @@ public class IPv6Guard extends JavaPlugin implements CommandExecutor, Listener, 
     }
 
     private boolean banIPv6Range(String cidrRange, String reason, boolean force, CommandSender sender, long expireTime) {
+        // Basic CIDR range validation to prevent server lag
+        if (cidrRange == null || cidrRange.isEmpty() || !cidrRange.contains("/") || !isValidIPv6Format(cidrRange.split("/")[0])) {
+            return false;
+        }
+        
         try {
             String[] parts = cidrRange.split("/");
             if (parts.length != 2) {
+                return false;
+            }
+
+            // Validate prefix length before parsing
+            try {
+                int prefixLength = Integer.parseInt(parts[1]);
+                if (prefixLength < 0 || prefixLength > 128) {
+                    return false;
+                }
+            } catch (NumberFormatException e) {
                 return false;
             }
 
@@ -772,18 +703,15 @@ public class IPv6Guard extends JavaPlugin implements CommandExecutor, Listener, 
 
             // Check if it's a forbidden IPv6 address
             if (isForbiddenIPv6(inet6)) {
-                sender.sendMessage("§cRefuse to ban special IPv6 prefix.");
+                sender.sendMessage("§c" + getLang("commands.ban6.refuse_special_prefix"));
                 return false;
             }
 
             int prefixLength = Integer.parseInt(parts[1]);
-            if (prefixLength < 0 || prefixLength > 128) {
-                return false;
-            }
 
             // Prevent /0 prefix matching
             if (prefixLength == 0) {
-                sender.sendMessage("§cRefuse to ban /0 prefix, which would affect all IPv6 addresses.");
+                sender.sendMessage("§c" + getLang("commands.ban6.refuse_zero_prefix"));
                 return false;
             }
 
@@ -802,6 +730,7 @@ public class IPv6Guard extends JavaPlugin implements CommandExecutor, Listener, 
             // Check if already banned
             for (BanEntry ban : bannedIPv6Ranges) {
                 if (ban.prefix.equals(normalizedPrefix)) {
+                    sender.sendMessage("§c" + getLang("messages.already_banned", normalizedPrefix));
                     return false; // Already banned
                 }
             }
@@ -822,6 +751,24 @@ public class IPv6Guard extends JavaPlugin implements CommandExecutor, Listener, 
         } catch (Exception e) {
             return false;
         }
+    }
+    
+    // Basic IPv6 format validation to prevent server lag from malformed input
+    private boolean isValidIPv6Format(String ip) {
+        // Simple regex for IPv6 validation - prevents obviously invalid input
+        // This is a basic check to avoid expensive DNS lookups or parsing
+        return ip.matches("^([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}$" + 
+                         "|^::1$" + 
+                         "|^::" + 
+                         "|^([0-9a-fA-F]{1,4}:){1,7}:$" + 
+                         "|^([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}$" + 
+                         "|^([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}$" + 
+                         "|^([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}$" + 
+                         "|^([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}$" + 
+                         "|^([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}$" + 
+                         "|^([0-9a-fA-F]{1,4}:)(:[0-9a-fA-F]{1,4}){1,6}$" + 
+                         "|^:((:[0-9a-fA-F]{1,4}){1,7}|:)$" + 
+                         "|^fe80:(:[0-9a-fA-F]{0,4}){0,4}%[0-9a-zA-Z]{1,}$");
     }
 
     // Normalize IPv6 prefix by clearing host bits - 修复顺序问题
@@ -918,39 +865,31 @@ public class IPv6Guard extends JavaPlugin implements CommandExecutor, Listener, 
                 try {
                     String[] parts = banStr.split("\\|");
                     String prefix = null;
-                    UUID id = null;
                     String reason = null;
                     long time = 0;
                     long expireTime = 0;
-                    boolean isNewFormat = false;
-                    boolean hasExpireTime = false;
                     
-                    // Parse common fields based on format
-                    if (parts.length == 4) {
-                        // New format with UUID
-                        id = UUID.fromString(parts[0]);
-                        prefix = parts[1];
-                        reason = parts[2];
-                        time = Long.parseLong(parts[3]);
-                        isNewFormat = true;
-                    } else if (parts.length == 3) {
-                        // Old format without UUID, migrate to new format
-                        prefix = parts[0];
-                        reason = parts[1];
-                        time = Long.parseLong(parts[2]);
-                    } else if (parts.length == 5) {
-                        // Format with UUID and expire time
-                        id = UUID.fromString(parts[0]);
-                        prefix = parts[1];
-                        reason = parts[2];
-                        time = Long.parseLong(parts[3]);
-                        expireTime = Long.parseLong(parts[4]);
-                        isNewFormat = true;
-                        hasExpireTime = true;
+                    // Parse fields - support multiple formats but ignore UUIDs
+                    if (parts.length >= 3) {
+                        // Determine if this is a format with UUID (ignore UUID field)
+                        int prefixIndex = 0;
+                        if (parts[0].matches("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")) {
+                            // Has UUID, skip it
+                            prefixIndex = 1;
+                        }
                         
-                        // Check if ban has expired
-                        if (expireTime > 0 && System.currentTimeMillis() > expireTime) {
-                            continue; // Skip expired bans
+                        // Parse core fields
+                        prefix = parts[prefixIndex];
+                        reason = parts[prefixIndex + 1];
+                        time = Long.parseLong(parts[prefixIndex + 2]);
+                        
+                        // Check for expire time (if present)
+                        if (parts.length >= prefixIndex + 4) {
+                            expireTime = Long.parseLong(parts[prefixIndex + 3]);
+                            // Check if ban has expired
+                            if (expireTime > 0 && System.currentTimeMillis() > expireTime) {
+                                continue; // Skip expired bans
+                            }
                         }
                     }
                     
@@ -967,16 +906,8 @@ public class IPv6Guard extends JavaPlugin implements CommandExecutor, Listener, 
                         continue;
                     }
                     
-                    // Create and add ban entry based on format
-                    BanEntry banEntry;
-                    if (hasExpireTime && isNewFormat) {
-                        banEntry = new BanEntry(id, prefix, reason, time, expireTime);
-                    } else if (isNewFormat) {
-                        banEntry = new BanEntry(id, prefix, reason, time);
-                    } else {
-                        banEntry = new BanEntry(prefix, reason, time);
-                    }
-                    
+                    // Create and add ban entry
+                    BanEntry banEntry = new BanEntry(prefix, reason, time, expireTime);
                     bannedIPv6Ranges.add(banEntry);
                     
                     // Add to prefix length bucket
@@ -995,7 +926,8 @@ public class IPv6Guard extends JavaPlugin implements CommandExecutor, Listener, 
     private void saveBans() {
         List<String> banStrings = new ArrayList<>();
         for (BanEntry ban : bannedIPv6Ranges) {
-            banStrings.add(ban.id + "|" + ban.prefix + "|" + ban.reason + "|" + ban.time + "|" + ban.expireTime);
+            // Save without UUID - simplified format
+            banStrings.add(ban.prefix + "|" + ban.reason + "|" + ban.time + "|" + ban.expireTime);
         }
         getConfig().set("bans", banStrings);
         saveConfig();
@@ -1004,15 +936,23 @@ public class IPv6Guard extends JavaPlugin implements CommandExecutor, Listener, 
     // Get estimated host description for a prefix length
     private String getEstimatedHosts(int prefixLength) {
         if (prefixLength == 128) {
-            return "1 address";
-        } else if (prefixLength >= 64) {
-            return "1 subnet (/64, typical residential LAN)";
-        } else if (prefixLength >= 48) {
-            return "ISP customer block (/48)";
-        } else if (prefixLength >= 32) {
-            return "regional allocation";
-        } else {
-            return "extremely large (dangerous)";
+            return "1";
         }
+        
+        int bits = 128 - prefixLength;
+        
+        // Calculate exact number of addresses
+        java.math.BigInteger hostCount;
+        if (bits <= 63) {
+            // For numbers that fit in long, use bit shift
+            hostCount = java.math.BigInteger.valueOf(1L << bits);
+        } else {
+            // For very large numbers, calculate using BigInteger shift
+            hostCount = java.math.BigInteger.ONE.shiftLeft(bits);
+        }
+        
+        // Format with commas every three digits
+        java.text.DecimalFormat formatter = new java.text.DecimalFormat("#,###");
+        return formatter.format(hostCount);
     }
 }
