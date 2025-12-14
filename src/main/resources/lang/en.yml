@@ -30,7 +30,7 @@ commands:
     require_force: "Use -f parameter to confirm this action."
     default_reason: "Banned by operator"
     no_bans: "No IPv6 bans found"
-    ban_list_title: "================== IPv6 Ban List ===================="
+    ban_list_title: "================= IPv6 Ban List ==================="
     ban_list_item: "%d."
     ban_list_prefix: "   Prefix: %s"
     ban_list_length: "   Prefix Length: %d"
