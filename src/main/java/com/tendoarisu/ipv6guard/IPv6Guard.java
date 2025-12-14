@@ -157,6 +157,23 @@ public class IPv6Guard extends JavaPlugin implements CommandExecutor, Listener, 
             getLogger().info(getLang("plugin.proxy_guard_enabled", sharedIpThreshold, timeWindowSeconds));
         }
     }
+    
+    // Reload all plugin configurations
+    private void reloadPluginConfig() {
+        // Reload main configuration
+        reloadConfig();
+        
+        // Reload safety configuration
+        loadSafetyConfig();
+        
+        // Reload language files
+        loadLanguage();
+        
+        // Reload bans from file
+        loadBans();
+        
+        getLogger().info("IPv6Guard configuration reloaded successfully.");
+    }
 
     @Override
     public void onDisable() {
@@ -411,6 +428,7 @@ public class IPv6Guard extends JavaPlugin implements CommandExecutor, Listener, 
             sender.sendMessage(getLang("commands.ban6.example3"));
             sender.sendMessage(getLang("commands.ban6.example4"));
             sender.sendMessage(getLang("commands.ban6.example5"));
+            sender.sendMessage(getLang("commands.ban6.example6"));
             return false;
         }
 
@@ -428,6 +446,14 @@ public class IPv6Guard extends JavaPlugin implements CommandExecutor, Listener, 
                 return false;
             }
             explainIPv6Prefix(args[1], sender);
+            return true;
+        }
+        
+        // Check for reload command
+        if (args[0].equalsIgnoreCase("reload")) {
+            // Reload configuration
+            reloadPluginConfig();
+            sender.sendMessage("§aConfiguration reloaded successfully!");
             return true;
         }
 
